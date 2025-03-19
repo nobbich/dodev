@@ -100,38 +100,98 @@ services:
       start_period: 5s
     restart: always
 
-  # Marquez open lineage
-  marquez:
-    image: marquezproject/marquez:latest
-    container_name: marquez-api
-    environment:
-      - DATABASE_URL=postgresql://marquez:marquez@timescaledb/marquez  # Marquez nutzt nun seine eigene DB und User
-      # - MARQUEZ_CONFIG=/opt/marquez/config.yml  # Verweis auf die externe Konfigurationsdatei
-      - MARQUEZ_JOBS_NAMESPACE=marquez
-      - MARQUEZ_HOST=0.0.0.0:5000
-      - MARQUEZ_PORT=5000
+  # kafka
+  kafka:
+    image: bitnami/kafka:latest
+    container_name: kafka
     ports:
-      - "5000:5000"
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://subdn1042:9092"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     depends_on:
-      postgres:
-        condition: service_healthy
-    restart: always
+      - zookeeper
     volumes:
-      - ${AIRFLOW_PROJ_DIR:-.}/marquez:/opt/marquez
-
-  marquez-ui:
-    image: marquezproject/marquez-web:latest
-    container_name: marquez-ui
-    environment:
-      - REACT_APP_API_URL=marquez-api:5000  # Verbindung zum Marquez-API-Container
-      - MARQUEZ_HOST=marquez-api
-      - MARQUEZ_PORT=5000
-      - WEB_PORT=3000
-    ports:
-      - "3000:3000"  # UI Port für Marquez
-    depends_on:
-      - marquez  # Sicherstellen, dass Marquez API läuft, bevor das UI gestartet wird
+      - /srv/airflow/kafka-data:/var/lib/kafka/data
     restart: always
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - /srv/airflow/zookeeper-data:/var/lib/zookeeper
+    restart: always
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:latest
+    container_name: schema-registry
+    hostname: schema-registry
+    restart: always
+    depends_on:
+      - kafka
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: "schema-registry"
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: "kafka:9092"
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+    ports:
+      - "8081:8081"
+
+  akhq:
+    image: tchiotludo/akhq
+    container_name: akhq
+    ports:
+      - "8090:8080"
+    environment:
+      AKHQ_CONFIGURATION: |
+        akhq:
+          connections:
+            kafka-cluster:
+              properties:
+                bootstrap.servers: "kafka:9092"
+              schema-registry:
+                url: "http://schema-registry:8081"
+              connect:
+                - name: "kafka-connect"
+                  url: "http://kafka-connect:8083"
+    volumes:
+      - /srv/airflow/application.yml:/app/application.yml
+    restart: always
+
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:latest
+    container_name: kafka-connect
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "kafka:9092"
+      CONNECT_REST_PORT: "8083"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect"
+      CONNECT_GROUP_ID: "connect-cluster"
+      CONNECT_CONFIG_STORAGE_TOPIC: "connect-configs"
+      CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
+      CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_LOG4J_LOGGERS: "org.apache.kafka.connect.runtime.rest=WARN"
+      CONNECT_PLUGIN_PATH: "/usr/share/java"
+    volumes:
+      - /srv/airflow/kafka-connect:/kafka-connect-storage  # Persistenz für Kafka Connect
+      - /srv/airflow/kafka-connect/plugins:/usr/share/java  # Persistenz für Kafka Connect plugins
+    depends_on:
+      - kafka
+      - schema-registry
 
   # OpenTelemetry Collector
   otel-collector:
