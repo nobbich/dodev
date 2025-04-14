@@ -386,6 +386,13 @@ services:
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
         exec /entrypoint airflow version
+      - |
+        echo "Warte auf Datenbank..."
+        until pg_isready -h postgres -p 5432 -U airflow; do sleep 2; done
+        echo "Aktiviere TimescaleDB-Extension..."
+        psql -h postgres -U airflow -d airflow -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
+        psql -h postgres -U airflow -d airflow -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+        
     # yamllint enable rule:line-length
     environment:
       <<: *airflow-common-env
